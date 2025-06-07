@@ -75,10 +75,10 @@ class Violation:
             "type": "error",
             "module": None,
             "obj": None,
-            "line": self.lineno,
-            "column": self.col_offset,
-            "endLine": self.lineno,
-            "endColumn": self.col_offset,
+            "line": self.loc.lineno,
+            "column": self.loc.col_offset,
+            "endLine": self.loc.lineno,
+            "endColumn": self.loc.col_offset,
             "path": str(self.path),
             "symbol": self.rule.name,
             "message": self.rule.message,
@@ -455,12 +455,21 @@ class Linter(ast.NodeVisitor):
             if MARKDOWN_LINK_RE.search(docstring.s):
                 self._check(docstring, rules.MarkdownLink())
 
+    def _pytest_mark_repeat(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        # Only check in test files
+        if not self.path.name.startswith("test_"):
+            return
+
+        if rules.PytestMarkRepeat.check(node):
+            self._check(Location.from_node(node), rules.PytestMarkRepeat())
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._test_name_typo(node)
         self._syntax_error_example(node)
         self._param_mismatch(node)
         self._markdown_link(node)
         self._invalid_abstract_method(node)
+        self._pytest_mark_repeat(node)
 
         for arg in node.args.args + node.args.kwonlyargs + node.args.posonlyargs:
             if arg.annotation:
@@ -480,6 +489,7 @@ class Linter(ast.NodeVisitor):
         self._param_mismatch(node)
         self._markdown_link(node)
         self._invalid_abstract_method(node)
+        self._pytest_mark_repeat(node)
         self.stack.append(node)
         self._no_rst(node)
         self.generic_visit(node)
@@ -674,21 +684,51 @@ class Linter(ast.NodeVisitor):
                     self._check(loc, rules.LazyModule())
 
 
+def _has_trace_ui_content(output: dict[str, Any]) -> bool:
+    """Check if an output contains MLflow trace UI content."""
+    data = output.get("data")
+    if not data:
+        return False
+
+    # Check only HTML outputs since trace UI content is only added to text/html
+    html = data.get("text/html")
+    if not html:
+        return False
+
+    return any("static-files/lib/notebook-trace-renderer/index.html" in line for line in html)
+
+
 def _lint_cell(path: Path, config: Config, cell: dict[str, Any], index: int) -> list[Violation]:
+    violations: list[Violation] = []
     type_ = cell.get("cell_type")
+
+    # Check for forbidden trace UI iframe in cell outputs
+    if outputs := cell.get("outputs"):
+        for output in outputs:
+            if _has_trace_ui_content(output):
+                violations.append(
+                    Violation(
+                        rules.ForbiddenTraceUIInNotebook(),
+                        path,
+                        Location(0, 0),
+                        cell=index,
+                    )
+                )
+                break
+
     if type_ != "code":
-        return []
+        return violations
 
     src = "\n".join(cell.get("source", []))
     try:
         tree = ast.parse(src)
     except SyntaxError:
         # Ignore non-python cells such as `!pip install ...`
-        return []
+        return violations
 
     linter = Linter(path=path, config=config, ignore=ignore_map(src), cell=index)
     linter.visit(tree)
-    violations = linter.violations
+    violations.extend(linter.violations)
 
     if not src.strip():
         violations.append(
@@ -705,11 +745,11 @@ def _lint_cell(path: Path, config: Config, cell: dict[str, Any], index: int) -> 
 def lint_file(path: Path, config: Config) -> list[Violation]:
     code = path.read_text()
     if path.suffix == ".ipynb":
+        violations = []
         if cells := json.loads(code).get("cells"):
-            violations = []
             for idx, cell in enumerate(cells, start=1):
                 violations.extend(_lint_cell(path, config, cell, idx))
-            return violations
+        return violations
     elif path.suffix in {".rst", ".md", ".mdx"}:
         violations = []
         code_blocks = (

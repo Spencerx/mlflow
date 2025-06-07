@@ -29,7 +29,7 @@ from mlflow.entities.logged_model_status import LoggedModelStatus
 from mlflow.entities.metric import Metric
 from mlflow.entities.model_registry import ModelVersion, ModelVersionTag
 from mlflow.entities.model_registry.model_version_status import ModelVersionStatus
-from mlflow.entities.model_registry.prompt import IS_PROMPT_TAG_KEY
+from mlflow.entities.model_registry.prompt_version import IS_PROMPT_TAG_KEY
 from mlflow.entities.param import Param
 from mlflow.entities.trace_data import TraceData
 from mlflow.entities.trace_state import TraceState
@@ -898,7 +898,13 @@ def test_set_and_delete_trace_tag_on_active_trace(monkeypatch):
 
 def test_set_trace_tag_on_logged_trace(mock_store):
     mlflow.tracking.MlflowClient().set_trace_tag("test", "foo", "bar")
-    mock_store.set_trace_tag.assert_called_once_with("test", "foo", "bar")
+    mlflow.tracking.MlflowClient().set_trace_tag("test", "mlflow.some.reserved.tag", "value")
+    mock_store.set_trace_tag.assert_has_calls(
+        [
+            mock.call("test", "foo", "bar"),
+            mock.call("test", "mlflow.some.reserved.tag", "value"),
+        ]
+    )
 
 
 def test_delete_trace_tag_on_active_trace(monkeypatch):

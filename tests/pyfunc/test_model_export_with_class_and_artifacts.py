@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import subprocess
@@ -38,6 +39,7 @@ from mlflow.models.auth_policy import AuthPolicy, SystemAuthPolicy, UserAuthPoli
 from mlflow.models.dependencies_schemas import DependenciesSchemasType
 from mlflow.models.model import _DATABRICKS_FS_LOADER_MODULE
 from mlflow.models.resources import (
+    DatabricksApp,
     DatabricksFunction,
     DatabricksGenieSpace,
     DatabricksServingEndpoint,
@@ -1545,6 +1547,7 @@ def test_model_save_load_with_resources(tmp_path):
             "genie_space": [{"name": "genie_space_id_1"}, {"name": "genie_space_id_2"}],
             "uc_connection": [{"name": "test_connection_1"}, {"name": "test_connection_2"}],
             "table": [{"name": "rag.studio.table_a"}, {"name": "rag.studio.table_b"}],
+            "app": [{"name": "test_databricks_app"}],
         },
     }
     mlflow.pyfunc.save_model(
@@ -1565,6 +1568,7 @@ def test_model_save_load_with_resources(tmp_path):
             DatabricksUCConnection(connection_name="test_connection_2"),
             DatabricksTable(table_name="rag.studio.table_a"),
             DatabricksTable(table_name="rag.studio.table_b"),
+            DatabricksApp(app_name="test_databricks_app"),
         ],
     )
 
@@ -1597,6 +1601,8 @@ def test_model_save_load_with_resources(tmp_path):
                 table:
                 - name: rag.studio.table_a
                 - name: rag.studio.table_b
+                app:
+                - name: test_databricks_app
             """
         )
 
@@ -1639,6 +1645,7 @@ def test_model_save_load_with_invokers_resources(tmp_path):
                 {"name": "rag.studio.table_a", "on_behalf_of_user": True},
                 {"name": "rag.studio.table_b"},
             ],
+            "app": [{"name": "test_databricks_app"}],
         },
     }
     mlflow.pyfunc.save_model(
@@ -1663,6 +1670,7 @@ def test_model_save_load_with_invokers_resources(tmp_path):
             DatabricksUCConnection(connection_name="test_connection_2"),
             DatabricksTable(table_name="rag.studio.table_a", on_behalf_of_user=True),
             DatabricksTable(table_name="rag.studio.table_b"),
+            DatabricksApp(app_name="test_databricks_app"),
         ],
     )
 
@@ -1700,6 +1708,8 @@ def test_model_save_load_with_invokers_resources(tmp_path):
                 - name: rag.studio.table_a
                   on_behalf_of_user: True
                 - name: rag.studio.table_b
+                app:
+                - name: test_databricks_app
             """
         )
 
@@ -1849,6 +1859,7 @@ def test_model_log_with_resources(tmp_path):
             ],
             "uc_connection": [{"name": "test_connection_1"}, {"name": "test_connection_2"}],
             "table": [{"name": "rag.studio.table_a"}, {"name": "rag.studio.table_b"}],
+            "app": [{"name": "test_databricks_app"}],
         },
     }
     with mlflow.start_run() as run:
@@ -1869,6 +1880,7 @@ def test_model_log_with_resources(tmp_path):
                 DatabricksUCConnection(connection_name="test_connection_2"),
                 DatabricksTable(table_name="rag.studio.table_a"),
                 DatabricksTable(table_name="rag.studio.table_b"),
+                DatabricksApp(app_name="test_databricks_app"),
             ],
         )
     pyfunc_model_uri = f"runs:/{run.info.run_id}/{pyfunc_artifact_path}"
@@ -1902,6 +1914,8 @@ def test_model_log_with_resources(tmp_path):
                 table:
                 - name: "rag.studio.table_a"
                 - name: "rag.studio.table_b"
+                app:
+                - name: test_databricks_app
             """
         )
 
@@ -2210,12 +2224,13 @@ def test_model_pip_requirements_pin_numpy_when_pandas_included():
         model_info = mlflow.pyfunc.log_model(
             name="model", python_model=TestModel(), input_example="abc"
         )
+
         _assert_pip_requirements(
             model_info.model_uri,
             [
                 expected_mlflow_version,
-                f"cloudpickle=={cloudpickle.__version__}",
-                f"pandas=={pandas.__version__}",
+                f"cloudpickle=={importlib.metadata.version('cloudpickle')}",
+                f"pandas=={importlib.metadata.version('pandas')}",
             ],
             strict=True,
         )
