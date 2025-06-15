@@ -4,6 +4,10 @@ import ast
 import re
 from abc import ABC, abstractmethod
 
+from packaging.version import InvalidVersion, Version
+
+from clint.resolver import Resolver
+
 
 class Rule(ABC):
     _CLASS_NAME_TO_RULE_NAME_REGEX = re.compile(r"(?<!^)(?=[A-Z])")
@@ -205,15 +209,16 @@ class UseSysExecutable(Rule):
         )
 
     @staticmethod
-    def check(node: ast.Call) -> bool:
+    def check(node: ast.Call, resolver: Resolver) -> bool:
         """
         Returns True if `node` looks like `subprocess.Popen(["mlflow", ...])`.
         """
+        resolved = resolver.resolve(node)
         if (
-            isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and (node.func.value.id == "subprocess")
-            and (node.func.attr in ["Popen", "run", "check_output", "check_call"])
+            resolved
+            and len(resolved) == 2
+            and resolved[0] == "subprocess"
+            and resolved[1] in ["Popen", "run", "check_output", "check_call"]
             and node.args
         ):
             first_arg = node.args[0]
@@ -351,3 +356,119 @@ class ForbiddenSetActiveModelUsage(Rule):
         return (
             "Usage of `set_active_model` is not allowed in mlflow, use `_set_active_model` instead."
         )
+
+    @staticmethod
+    def check(node: ast.Call, resolver: Resolver) -> bool:
+        """Check if this is a call to set_active_model function."""
+        return (
+            (resolved := resolver.resolve(node))
+            and len(resolved) >= 1
+            and resolved[0] == "mlflow"
+            and resolved[-1] == "set_active_model"
+        )
+
+
+class ForbiddenTraceUIInNotebook(Rule):
+    def _id(self) -> str:
+        return "MLF0022"
+
+    def _message(self) -> str:
+        return (
+            "Found the MLflow Trace UI iframe in the notebook. "
+            "The trace UI in cell outputs will not render correctly in previews or the website. "
+            "Please run `mlflow.tracing.disable_notebook_display()` and rerun the cell "
+            "to remove the iframe."
+        )
+
+
+class PytestMarkRepeat(Rule):
+    def _id(self) -> str:
+        return "MLF0023"
+
+    def _message(self) -> str:
+        return (
+            "@pytest.mark.repeat decorator should not be committed. "
+            "This decorator is meant for local testing only to check for flaky tests."
+        )
+
+    @staticmethod
+    def check(node: ast.FunctionDef | ast.AsyncFunctionDef, resolver: Resolver) -> bool:
+        """
+        Returns True if the function has @pytest.mark.repeat decorator.
+        """
+        return any(
+            (res := resolver.resolve(deco)) and res == ["pytest", "mark", "repeat"]
+            for deco in node.decorator_list
+        )
+
+
+def _is_valid_version(version: str) -> bool:
+    try:
+        v = Version(version)
+        return not (v.is_devrelease or v.is_prerelease or v.is_postrelease)
+    except InvalidVersion:
+        return False
+
+
+class UnnamedThread(Rule):
+    def _id(self) -> str:
+        return "MLF0024"
+
+    def _message(self) -> str:
+        return (
+            "`threading.Thread()` must be called with a `name` argument to improve debugging "
+            "and traceability of thread-related issues."
+        )
+
+    @staticmethod
+    def check(node: ast.Call, resolver: Resolver) -> bool:
+        """
+        Returns True if the call is threading.Thread() without a name parameter.
+        """
+        return (
+            (resolved := resolver.resolve(node))
+            and resolved == ["threading", "Thread"]
+            and not any(keyword.arg == "name" for keyword in node.keywords)
+        )
+
+
+class InvalidExperimentalDecorator(Rule):
+    def _id(self) -> str:
+        return "MLF0025"
+
+    def _message(self) -> str:
+        return (
+            "Invalid usage of `@experimental` decorator. It must be used with a `version` "
+            "argument that is a valid semantic version string."
+        )
+
+    @staticmethod
+    def check(node: ast.expr, resolver: Resolver) -> bool:
+        """
+        Returns True if the `@experimental` decorator from mlflow.utils.annotations is used
+        incorrectly.
+        """
+        resolved = resolver.resolve(node)
+        if not resolved:
+            return False
+
+        if resolved != ["mlflow", "utils", "annotations", "experimental"]:
+            return False
+
+        if not isinstance(node, ast.Call):
+            return True
+
+        version = next((k.value for k in node.keywords if k.arg == "version"), None)
+        if version is None:
+            # No `version` argument, invalid usage
+            return True
+
+        if not isinstance(version, ast.Constant) or not isinstance(version.value, str):
+            # `version` is not a string literal, invalid usage
+            return True
+
+        if not _is_valid_version(version.value):
+            # `version` is not a valid semantic version, # invalid usage
+            return True
+
+        return False

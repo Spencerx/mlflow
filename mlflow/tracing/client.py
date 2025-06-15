@@ -2,12 +2,13 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 import mlflow
 from mlflow.entities.assessment import (
     Assessment,
 )
+from mlflow.entities.model_registry import PromptVersion
 from mlflow.entities.span import NO_OP_SPAN_TRACE_ID
 from mlflow.entities.trace import Trace
 from mlflow.entities.trace_data import TraceData
@@ -419,13 +420,6 @@ class TracingClient:
             value: The string value of the tag. Must be at most 250 characters long, otherwise
                 it will be truncated when stored.
         """
-        if key.startswith("mlflow."):
-            raise MlflowException(
-                f"Tags starting with 'mlflow.' are reserved and cannot be set. "
-                f"Attempted to set tag with key '{key}' on trace with ID '{request_id}'.",
-                error_code=INVALID_PARAMETER_VALUE,
-            )
-
         if not isinstance(value, str):
             _logger.warning(
                 "Received non-string value for trace tag. Please note that non-string tag values"
@@ -606,3 +600,18 @@ class TracingClient:
             request_metadata=trace_info.request_metadata,
             tags=trace_info.tags or {},
         )
+
+    def link_prompt_versions_to_trace(
+        self, trace_id: str, prompts: Sequence[PromptVersion]
+    ) -> None:
+        """
+        Link multiple prompt versions to a trace.
+
+        Args:
+            trace_id: The ID of the trace to link prompts to.
+            prompts: List of PromptVersion objects to link to the trace.
+        """
+        from mlflow.tracking._model_registry.utils import _get_store as _get_model_registry_store
+
+        registry_store = _get_model_registry_store()
+        registry_store.link_prompts_to_trace(prompt_versions=prompts, trace_id=trace_id)
