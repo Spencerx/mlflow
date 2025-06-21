@@ -8,7 +8,7 @@ import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple, Optional, TypedDict
 
 from mlflow.entities import (
     Dataset,
@@ -163,6 +163,15 @@ def _read_persisted_run_info_dict(run_info_dict):
     if isinstance(dict_copy["experiment_id"], int):
         dict_copy["experiment_id"] = str(dict_copy["experiment_id"])
     return RunInfo.from_dictionary(dict_copy)
+
+
+class DatasetFilter(TypedDict, total=False):
+    """
+    Dataset filter used for search_logged_models.
+    """
+
+    dataset_name: str
+    dataset_digest: str
 
 
 class FileStore(AbstractStore):
@@ -858,27 +867,15 @@ class FileStore(AbstractStore):
         Args:
             run_id: Unique identifier for run.
             metric_key: Metric name within the run.
-            max_results: An indicator for paginated results. This functionality is not
-                implemented for FileStore and is unused in this store's implementation.
-            page_token: An indicator for paginated results. This functionality is not
-                implemented for FileStore and if the value is overridden with a value other than
-                ``None``, an MlflowException will be thrown.
+            max_results: An indicator for paginated results.
+            page_token: Token indicating the page of metric history to fetch.
 
         Returns:
-            A List of :py:class:`mlflow.entities.Metric` entities if ``metric_key`` values
+            A :py:class:`mlflow.store.entities.paged_list.PagedList` of
+            :py:class:`mlflow.entities.Metric` entities if ``metric_key`` values
             have been logged to the ``run_id``, else an empty list.
 
         """
-        # NB: The FileStore does not currently support pagination for this API.
-        # Raise if `page_token` is specified, as the functionality to support paged queries
-        # is not implemented.
-        if page_token is not None:
-            raise MlflowException(
-                "The FileStore backend does not support pagination for the "
-                f"`get_metric_history` API. Supplied argument `page_token` '{page_token}' must "
-                "be `None`."
-            )
-
         _validate_run_id(run_id)
         _validate_metric_name(metric_key)
         run_info = self._get_run_info(run_id)
@@ -886,13 +883,23 @@ class FileStore(AbstractStore):
         parent_path, metric_files = self._get_run_files(run_info, "metric")
         if metric_key not in metric_files:
             return PagedList([], None)
-        return PagedList(
-            [
-                FileStore._get_metric_from_line(run_id, metric_key, line, run_info.experiment_id)
-                for line in read_file_lines(parent_path, metric_key)
-            ],
-            None,
-        )
+
+        all_lines = read_file_lines(parent_path, metric_key)
+
+        all_metrics = [
+            FileStore._get_metric_from_line(run_id, metric_key, line, run_info.experiment_id)
+            for line in all_lines
+        ]
+
+        if max_results is None:
+            # If no max_results specified, return all metrics but handle page_token if provided
+            offset = SearchUtils.parse_start_offset_from_page_token(page_token)
+            metrics = all_metrics[offset:]
+            next_page_token = None
+        else:
+            metrics, next_page_token = SearchUtils.paginate(all_metrics, page_token, max_results)
+
+        return PagedList(metrics, next_page_token)
 
     @staticmethod
     def _get_param_from_file(parent_path, param_name):
@@ -2015,6 +2022,8 @@ class FileStore(AbstractStore):
         model_info_dict["lifecycle_stage"] = LifecycleStage.ACTIVE
         write_yaml(model_dir, FileStore.META_DATA_FILE_NAME, model_info_dict)
         mkdir(model_dir, FileStore.METRICS_FOLDER_NAME)
+        mkdir(model_dir, FileStore.PARAMS_FOLDER_NAME)
+        self.log_logged_model_params(model_id=model_id, params=params or [])
         self.set_logged_model_tags(model_id=model_id, tags=tags or [])
 
         return self.get_logged_model(model_id=model_id)
@@ -2146,8 +2155,8 @@ class FileStore(AbstractStore):
 
     def _make_persisted_model_dict(self, model: LoggedModel) -> dict[str, Any]:
         model_dict = model.to_dictionary()
-        model_dict.pop("tags", None)
-        model_dict.pop("metrics", None)
+        for field in ("tags", "params", "metrics"):
+            model_dict.pop(field, None)
         return model_dict
 
     def _get_model_dict(self, model_id: str) -> dict[str, Any]:
@@ -2198,8 +2207,7 @@ class FileStore(AbstractStore):
     def _get_model_info_from_dir(self, model_dir: str) -> dict[str, Any]:
         model_dict = FileStore._read_yaml(model_dir, FileStore.META_DATA_FILE_NAME)
         model_dict["tags"] = self._get_all_model_tags(model_dir)
-        for param in self._get_all_model_params(model_dir):
-            model_dict["params"][param.key] = param.value
+        model_dict["params"] = {p.key: p.value for p in self._get_all_model_params(model_dir)}
         model_dict["metrics"] = self._get_all_model_metrics(
             model_id=model_dict["model_id"], model_dir=model_dir
         )
@@ -2284,7 +2292,7 @@ class FileStore(AbstractStore):
         self,
         experiment_ids: list[str],
         filter_string: Optional[str] = None,
-        datasets: Optional[list[str]] = None,
+        datasets: Optional[list[DatasetFilter]] = None,
         max_results: Optional[int] = None,
         order_by: Optional[list[dict[str, Any]]] = None,
         page_token: Optional[str] = None,
@@ -2298,8 +2306,8 @@ class FileStore(AbstractStore):
             datasets: List of dictionaries to specify datasets on which to apply metrics filters.
                 The following fields are supported:
 
-                name (str): Required. Name of the dataset.
-                digest (str): Optional. Digest of the dataset.
+                dataset_name (str): Required. Name of the dataset.
+                dataset_digest (str): Optional. Digest of the dataset.
             max_results: Maximum number of logged models desired. Default is 100.
             order_by: List of dictionaries to specify the ordering of the search results.
                 The following fields are supported:
@@ -2320,9 +2328,9 @@ class FileStore(AbstractStore):
             A :py:class:`PagedList <mlflow.store.entities.PagedList>` of
             :py:class:`LoggedModel <mlflow.entities.LoggedModel>` objects.
         """
-        if datasets:
+        if datasets and not all(d.get("dataset_name") for d in datasets):
             raise MlflowException(
-                "Filtering by datasets is not currently supported by FileStore",
+                "`dataset_name` in the `datasets` clause must be specified.",
                 INVALID_PARAMETER_VALUE,
             )
         max_results = max_results or SEARCH_LOGGED_MODEL_MAX_RESULTS_DEFAULT
@@ -2330,7 +2338,7 @@ class FileStore(AbstractStore):
         for experiment_id in experiment_ids:
             models = self._list_models(experiment_id)
             all_models.extend(models)
-        filtered = SearchLoggedModelsUtils.filter_logged_models(all_models, filter_string)
+        filtered = SearchLoggedModelsUtils.filter_logged_models(all_models, filter_string, datasets)
         sorted_logged_models = SearchLoggedModelsUtils.sort(filtered, order_by)
         logged_models, next_page_token = SearchLoggedModelsUtils.paginate(
             sorted_logged_models, page_token, max_results
