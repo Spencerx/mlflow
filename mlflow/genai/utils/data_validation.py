@@ -8,7 +8,7 @@ from mlflow.tracing.provider import trace_disabled
 _logger = logging.getLogger(__name__)
 
 
-def check_model_prediction(predict_fn: Callable, sample_input: Any):
+def check_model_prediction(predict_fn: Callable[..., Any], sample_input: Any):
     """
     Validate if the predict function executes properly with the provided input.
 
@@ -32,8 +32,8 @@ def check_model_prediction(predict_fn: Callable, sample_input: Any):
 
 
 def _validate_function_and_input_compatibility(
-    predict_fn: Callable, sample_input: dict[str, Any], e: Exception
-) -> Callable:
+    predict_fn: Callable[..., Any], sample_input: dict[str, Any], e: Exception
+) -> Callable[..., Any]:
     """
     Validate the data format in the input column against the predict_fn.
 
@@ -55,8 +55,7 @@ def _validate_function_and_input_compatibility(
     # For other errors, show a generic error message
     raise MlflowException.invalid_parameter_value(
         "Failed to run the prediction function specified in the `predict_fn` "
-        "parameter. Please make sure that the input dictionary contains the "
-        f"keys that match with the `predict_fn` parameters. Error: {e}\n\n"
+        f"parameter. Input: {sample_input}. Error: {e}\n\n"
     ) from e
 
 

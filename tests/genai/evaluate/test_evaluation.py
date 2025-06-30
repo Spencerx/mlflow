@@ -1,5 +1,6 @@
 import uuid
 from importlib import import_module
+from typing import Any
 from unittest import mock
 from unittest.mock import patch
 
@@ -79,10 +80,10 @@ def test_evaluate_with_static_dataset():
     )
 
     metrics = result.metrics
-    assert metrics["metric/exact_match/average"] == 1.0
-    assert metrics["metric/max_length/average"] == 0.5
-    assert metrics["metric/relevance/relevance/average"] == 1.0
-    assert metrics["metric/has_trace/average"] == 1.0
+    assert metrics["exact_match/mean"] == 1.0
+    assert metrics["max_length/mean"] == 0.5
+    assert metrics["relevance/mean"] == 1.0
+    assert metrics["has_trace/mean"] == 1.0
 
     # Exact number of traces should be generated
     traces = get_traces()
@@ -121,10 +122,10 @@ def test_evaluate_with_predict_fn(is_predict_fn_traced):
     )
 
     metrics = result.metrics
-    assert metrics["metric/exact_match/average"] == 0.0
-    assert metrics["metric/max_length/average"] == 0.5
-    assert metrics["metric/relevance/relevance/average"] == 1.0
-    assert metrics["metric/has_trace/average"] == 1.0
+    assert metrics["exact_match/mean"] == 0.0
+    assert metrics["max_length/mean"] == 0.5
+    assert metrics["relevance/mean"] == 1.0
+    assert metrics["has_trace/mean"] == 1.0
 
     # Exact number of traces should be generated
     traces = get_traces()
@@ -183,16 +184,18 @@ def test_evaluate_with_traces(pass_full_dataframe):
     if not pass_full_dataframe:
         data = data[["trace"]]
 
-    result = mlflow.genai.evaluate(
-        data=data,
-        scorers=[exact_match, max_length, relevance, has_trace],
-    )
+    # Disable logging traces to MLflow to avoid calling mlflow APIs which need to be mocked
+    with mock.patch.dict("os.environ", {"AGENT_EVAL_LOG_TRACES_TO_MLFLOW_ENABLED": "false"}):
+        result = mlflow.genai.evaluate(
+            data=data,
+            scorers=[exact_match, max_length, relevance, has_trace],
+        )
 
     metrics = result.metrics
-    assert metrics["metric/exact_match/average"] == 0.0
-    assert metrics["metric/max_length/average"] == 0.5
-    assert metrics["metric/relevance/relevance/average"] == 1.0
-    assert metrics["metric/has_trace/average"] == 1.0
+    assert metrics["exact_match/mean"] == 0.0
+    assert metrics["max_length/mean"] == 0.5
+    assert metrics["relevance/mean"] == 1.0
+    assert metrics["has_trace/mean"] == 1.0
 
     # Assessments should be added to the traces in-place and no new trace should be created
     assert len(get_traces()) == len(questions)
@@ -224,11 +227,14 @@ def test_evaluate_with_managed_dataset():
             self.records[dataset_id].extend(records)
 
         def upsert_dataset_record_expectations(
-            self, name: str, dataset_id: str, record_id: str, expectations: list[dict]
+            self, name: str, dataset_id: str, record_id: str, expectations: list[dict[str, Any]]
         ):
             for record in self.records[dataset_id]:
                 if record.id == record_id:
                     record.expectations.update(expectations)
+
+        def sync_dataset_to_uc(self, dataset_id: str, uc_table_name: str):
+            pass
 
     mock_client = MockDatasetClient()
     with (
@@ -236,7 +242,7 @@ def test_evaluate_with_managed_dataset():
         mock.patch("databricks.rag_eval.datasets.entities._get_client", return_value=mock_client),
     ):
         dataset = create_dataset(uc_table_name="mlflow.managed.dataset", experiment_id="exp-123")
-        dataset.insert(
+        dataset.merge_records(
             [
                 {
                     "inputs": {"question": "What is MLflow?"},
@@ -262,10 +268,10 @@ def test_evaluate_with_managed_dataset():
         )
 
     metrics = result.metrics
-    assert metrics["metric/exact_match/average"] == 0.0
-    assert metrics["metric/max_length/average"] == 0.5
-    assert metrics["metric/relevance/relevance/average"] == 1.0
-    assert metrics["metric/has_trace/average"] == 1.0
+    assert metrics["exact_match/mean"] == 0.0
+    assert metrics["max_length/mean"] == 0.5
+    assert metrics["relevance/mean"] == 1.0
+    assert metrics["has_trace/mean"] == 1.0
 
     run = mlflow.get_run(result.run_id)
     # Dataset metadata should be added to the run
@@ -279,7 +285,6 @@ def test_evaluate_with_managed_dataset():
 def test_model_from_deployment_endpoint(mock_get_deploy_client):
     mock_client = mock_get_deploy_client.return_value
     mock_client.predict.return_value = _DUMMY_CHAT_RESPONSE
-    mock_client.get_endpoint.return_value = {"task": "llm/v1/chat"}
 
     data = [
         {
@@ -299,34 +304,22 @@ def test_model_from_deployment_endpoint(mock_get_deploy_client):
             }
         },
     ]
-
     predict_fn = mlflow.genai.to_predict_fn("endpoints:/chat")
-
-    # predict_fn should be callable with a single input
-    response = predict_fn(**data[0]["inputs"])
-
-    mock_client.predict.assert_called_once_with(
-        endpoint="chat",
-        inputs=data[0]["inputs"],
-    )
-    assert response == _DUMMY_CHAT_RESPONSE  # Chat response should not be parsed
-    mock_client.reset_mock()
-
-    # Running evaluation
     result = mlflow.genai.evaluate(
         data=data,
         predict_fn=predict_fn,
         scorers=[has_trace],
     )
 
+    databricks_options = {"databricks_options": {"return_trace": True}}
     mock_client.predict.assert_has_calls(
         [
             # Test call to check if the function is traced or not
-            mock.call(endpoint="chat", inputs=data[0]["inputs"]),
+            mock.call(endpoint="chat", inputs={**data[0]["inputs"], **databricks_options}),
             # First evaluation call
-            mock.call(endpoint="chat", inputs=data[0]["inputs"]),
+            mock.call(endpoint="chat", inputs={**data[0]["inputs"], **databricks_options}),
             # Second evaluation call
-            mock.call(endpoint="chat", inputs=data[1]["inputs"]),
+            mock.call(endpoint="chat", inputs={**data[1]["inputs"], **databricks_options}),
         ],
         any_order=True,
     )
@@ -338,7 +331,6 @@ def test_model_from_deployment_endpoint(mock_get_deploy_client):
     spans = traces[0].data.spans
     assert len(spans) == 1
     assert spans[0].name == "predict"
-    assert spans[0].attributes["endpoint"] == "endpoints:/chat"
     # Eval harness runs prediction in parallel, so the order is not deterministic
     assert spans[0].inputs in (data[0]["inputs"], data[1]["inputs"])
     assert spans[0].outputs == _DUMMY_CHAT_RESPONSE

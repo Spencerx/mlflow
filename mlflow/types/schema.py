@@ -142,7 +142,7 @@ class BaseType(ABC):
         """
 
     @abstractmethod
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """
         Dictionary representation of the object.
         """
@@ -671,7 +671,7 @@ class Map(BaseType):
         raise MlflowException(f"Map type {self!r} and {other!r} are incompatible")
 
 
-@experimental
+@experimental(version="2.19.0")
 class AnyType(BaseType):
     def __init__(self):
         """
@@ -812,7 +812,7 @@ class TensorInfo:
     Representation of the shape and type of a Tensor.
     """
 
-    def __init__(self, dtype: np.dtype, shape: Union[tuple, list]):
+    def __init__(self, dtype: np.dtype, shape: Union[tuple[Any, ...], list[Any]]):
         if not isinstance(dtype, np.dtype):
             raise TypeError(
                 f"Expected `dtype` to be instance of `{np.dtype}`, received `{dtype.__class__}`"
@@ -842,7 +842,7 @@ class TensorInfo:
         return self._dtype
 
     @property
-    def shape(self) -> tuple:
+    def shape(self) -> tuple[int, ...]:
         """The tensor shape"""
         return self._shape
 
@@ -875,7 +875,7 @@ class TensorSpec:
     def __init__(
         self,
         type: np.dtype,
-        shape: Union[tuple, list],
+        shape: Union[tuple[int, ...], list[int]],
         name: Optional[str] = None,
     ):
         self._name = name
@@ -895,7 +895,7 @@ class TensorSpec:
         return self._name
 
     @property
-    def shape(self) -> tuple:
+    def shape(self) -> tuple[int, ...]:
         """The tensor shape"""
         return self._tensorInfo.shape
 
@@ -1092,7 +1092,7 @@ class Schema:
     def from_json(cls, json_str: str):
         """Deserialize from a json string."""
 
-        def read_input(x: dict):
+        def read_input(x: dict[str, Any]):
             return (
                 TensorSpec.from_json_dict(**x)
                 if x["type"] == "tensor"
@@ -1215,7 +1215,7 @@ class ParamSpec:
         return self._default
 
     @property
-    def shape(self) -> Optional[tuple]:
+    def shape(self) -> Optional[tuple[int, ...]]:
         """
         The parameter shape.
         If shape is None, the parameter is a scalar.
@@ -1385,7 +1385,7 @@ def _get_dataclass_annotations(cls) -> dict[str, Any]:
     return annotations
 
 
-@experimental
+@experimental(version="2.13.0")
 def convert_dataclass_to_schema(dataclass):
     """
     Converts a given dataclass into a Schema object. The dataclass must include type hints

@@ -7,6 +7,11 @@ class TraceMetadataKey:
     SIZE_BYTES = "mlflow.trace.sizeBytes"
     # Aggregated token usage information in a single trace, stored as a dumped JSON string.
     TOKEN_USAGE = "mlflow.trace.tokenUsage"
+    # Store the user ID/name of the application request. Do not confuse this with mlflow.user
+    # tag, which stores "who created the trace" i.e. developer or system name.
+    TRACE_USER = "mlflow.trace.user"
+    # Store the session ID of the application request.
+    TRACE_SESSION = "mlflow.trace.session"
 
 
 class TraceTagKey:
@@ -63,7 +68,8 @@ MAX_CHARS_IN_TRACE_INFO_TAGS_KEY = 250
 MAX_CHARS_IN_TRACE_INFO_TAGS_VALUE = 4096
 TRUNCATION_SUFFIX = "..."
 
-TRACE_REQUEST_RESPONSE_PREVIEW_MAX_LENGTH = 10000
+TRACE_REQUEST_RESPONSE_PREVIEW_MAX_LENGTH_DBX = 10000
+TRACE_REQUEST_RESPONSE_PREVIEW_MAX_LENGTH_OSS = 1000
 
 # Trace request ID must have the prefix "tr-" appended to the OpenTelemetry trace ID
 TRACE_REQUEST_ID_PREFIX = "tr-"
@@ -78,3 +84,9 @@ TRACE_SCHEMA_VERSION_KEY = "mlflow.trace_schema.version"
 
 STREAM_CHUNK_EVENT_NAME_FORMAT = "mlflow.chunk.item.{index}"
 STREAM_CHUNK_EVENT_VALUE_KEY = "mlflow.chunk.value"
+
+
+# Key for Databricks model serving options to return the trace in the response
+DATABRICKS_OPTIONS_KEY = "databricks_options"
+RETURN_TRACE_OPTION_KEY = "return_trace"
+DATABRICKS_OUTPUT_KEY = "databricks_output"
