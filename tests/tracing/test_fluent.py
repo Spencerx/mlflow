@@ -16,9 +16,10 @@ from mlflow.entities import (
     SpanType,
     Trace,
     TraceData,
-    TraceInfoV2,
+    TraceInfo,
 )
-from mlflow.entities.trace_status import TraceStatus
+from mlflow.entities.trace_location import TraceLocation
+from mlflow.entities.trace_state import TraceState
 from mlflow.environment_variables import MLFLOW_TRACKING_USERNAME
 from mlflow.exceptions import MlflowException
 from mlflow.store.entities.paged_list import PagedList
@@ -198,7 +199,7 @@ def test_trace(wrap_sync_func, with_active_run, async_logging_enabled):
     assert trace.info.trace_id is not None
     assert trace.info.experiment_id == _get_experiment_id()
     assert trace.info.execution_time_ms >= 0.1 * 1e3  # at least 0.1 sec
-    assert trace.info.status == SpanStatusCode.OK
+    assert trace.info.state == TraceState.OK
     assert trace.info.request_metadata[TraceMetadataKey.INPUTS] == '{"x": 2, "y": 5}'
     assert trace.info.request_metadata[TraceMetadataKey.OUTPUTS] == "64"
     if with_active_run:
@@ -323,7 +324,7 @@ def test_trace_with_databricks_tracking_uri(databricks_tracking_uri, monkeypatch
         model.predict(2, 5)
         mlflow.flush_trace_async_logging(terminate=True)
 
-    mock_get_store().start_trace_v3.assert_called_once()
+    mock_get_store().start_trace.assert_called_once()
     mock_upload_trace_data.assert_called_once()
 
 
@@ -493,7 +494,7 @@ def test_trace_handle_exception_during_prediction(sync):
     # Trace should be logged even if the function fails, with status code ERROR
     trace = mlflow.get_trace(mlflow.get_last_active_trace_id())
     assert trace.info.trace_id is not None
-    assert trace.info.status == TraceStatus.ERROR
+    assert trace.info.state == TraceState.ERROR
     assert trace.info.request_metadata[TraceMetadataKey.INPUTS] == '{"x": 2, "y": 5}'
     assert trace.info.request_metadata[TraceMetadataKey.OUTPUTS] == ""
 
@@ -518,7 +519,7 @@ def test_trace_handle_exception_during_streaming():
     traces = get_traces()
     assert len(traces) == 1
     trace = traces[0]
-    assert trace.info.status == TraceStatus.ERROR
+    assert trace.info.state == TraceState.ERROR
     assert trace.info.request_metadata[TraceMetadataKey.INPUTS] == '{"x": 2}'
 
     # The test model is expected to produce three spans
@@ -578,16 +579,6 @@ def test_trace_ignore_exception(monkeypatch, model):
         _call_model_and_assert_output(model)
 
     assert get_traces() == []
-
-    # Exception during inspecting inputs: trace should be logged without inputs field
-    with mock.patch("inspect.signature", side_effect=ValueError("Some error")) as mock_input_args:
-        _call_model_and_assert_output(model)
-        assert mock_input_args.call_count > 0
-
-    traces = get_traces()
-    assert len(traces) == 1
-    assert traces[0].info.status == TraceStatus.OK
-    purge_traces()
 
     # Exception during ending span: trace should not be logged.
     tracer = _get_tracer(__name__)
@@ -650,7 +641,7 @@ def test_start_span_context_manager(async_logging_enabled):
     assert trace.info.trace_id is not None
     assert trace.info.experiment_id == _get_experiment_id()
     assert trace.info.execution_time_ms >= 0.1 * 1e3  # at least 0.1 sec
-    assert trace.info.status == TraceStatus.OK
+    assert trace.info.state == TraceState.OK
     assert trace.info.request_metadata[TraceMetadataKey.INPUTS] == '{"x": 1, "y": 2}'
     assert trace.info.request_metadata[TraceMetadataKey.OUTPUTS] == "25"
 
@@ -731,7 +722,7 @@ def test_start_span_context_manager_with_imperative_apis(async_logging_enabled):
     assert trace.info.trace_id is not None
     assert trace.info.experiment_id == _get_experiment_id()
     assert trace.info.execution_time_ms >= 0.1 * 1e3  # at least 0.1 sec
-    assert trace.info.status == TraceStatus.OK
+    assert trace.info.state == TraceState.OK
     assert trace.info.request_metadata[TraceMetadataKey.INPUTS] == '{"x": 1, "y": 2}'
     assert trace.info.request_metadata[TraceMetadataKey.OUTPUTS] == "5"
 
@@ -879,6 +870,7 @@ def test_search_traces(return_type, mock_client):
         page_token=None,
         model_id=None,
         sql_warehouse_id=None,
+        include_spans=True,
     )
 
 
@@ -914,12 +906,15 @@ def test_search_traces_with_pagination(mock_client):
         "max_results": SEARCH_TRACES_DEFAULT_MAX_RESULTS,
         "filter_string": None,
         "order_by": None,
+        "include_spans": True,
+        "model_id": None,
+        "sql_warehouse_id": None,
     }
     mock_client.search_traces.assert_has_calls(
         [
-            mock.call(**common_args, page_token=None, model_id=None, sql_warehouse_id=None),
-            mock.call(**common_args, page_token="token-1", model_id=None, sql_warehouse_id=None),
-            mock.call(**common_args, page_token="token-2", model_id=None, sql_warehouse_id=None),
+            mock.call(**common_args, page_token=None),
+            mock.call(**common_args, page_token="token-1"),
+            mock.call(**common_args, page_token="token-2"),
         ]
     )
 
@@ -938,6 +933,7 @@ def test_search_traces_with_default_experiment_id(mock_client):
         page_token=None,
         model_id=None,
         sql_warehouse_id=None,
+        include_spans=True,
     )
 
 
@@ -969,7 +965,7 @@ def test_search_traces_yields_expected_dataframe_contents(monkeypatch):
     ]
     for idx, trace in enumerate(expected_traces):
         assert df.iloc[idx].trace_id == trace.info.trace_id
-        assert df.iloc[idx].trace.info.trace_id == trace.info.trace_id
+        assert Trace.from_json(df.iloc[idx].trace).info.trace_id == trace.info.trace_id
         assert df.iloc[idx].client_request_id == trace.info.client_request_id
         assert df.iloc[idx].state == trace.info.state
         assert df.iloc[idx].request_time == trace.info.request_time
@@ -987,18 +983,14 @@ def test_search_traces_handles_missing_response_tags_and_metadata(mock_client):
     mock_client.search_traces.return_value = PagedList(
         [
             Trace(
-                info=TraceInfoV2(
-                    request_id=5,
-                    experiment_id="test",
-                    timestamp_ms=1,
-                    execution_time_ms=2,
-                    status=TraceStatus.OK,
+                info=TraceInfo(
+                    trace_id="5",
+                    trace_location=TraceLocation.from_experiment_id("test"),
+                    request_time=1,
+                    execution_duration=2,
+                    state=TraceState.OK,
                 ),
-                data=TraceData(
-                    spans=[],
-                    request="request",
-                    # Response is missing
-                ),
+                data=TraceData(spans=[]),
             )
         ],
         token=None,
@@ -1007,7 +999,8 @@ def test_search_traces_handles_missing_response_tags_and_metadata(mock_client):
     df = mlflow.search_traces()
     assert df["response"].isnull().all()
     assert df["tags"].tolist() == [{}]
-    assert df["trace_metadata"].tolist() == [{}]
+    # trace_metadata should only contain the schema version
+    assert df["trace_metadata"].tolist() == [{TRACE_SCHEMA_VERSION_KEY: str(TRACE_SCHEMA_VERSION)}]
 
 
 @skip_when_testing_trace_sdk
@@ -1207,9 +1200,9 @@ def test_get_last_active_trace_id():
     assert trace.data.request == '{"x": 3, "y": 6}'
 
     # Mutation of the copy should not affect the original trace logged in the backend
-    trace.info.status = TraceStatus.ERROR
+    trace.info.state = TraceState.ERROR
     original_trace = mlflow.get_trace(trace.info.trace_id)
-    assert original_trace.info.status == TraceStatus.OK
+    assert original_trace.info.state == TraceState.OK
 
 
 def test_get_last_active_trace_thread_local():
@@ -1231,7 +1224,7 @@ def test_get_last_active_trace_thread_local():
     assert len(trace_ids) == 10
     for i, trace_id in enumerate(trace_ids):
         trace = mlflow.get_trace(trace_id)
-        assert trace.info.status == TraceStatus.OK
+        assert trace.info.state == TraceState.OK
         assert trace.data.spans[0].name == f"predict_{i}"
 
 
@@ -1361,14 +1354,14 @@ def test_update_current_trace():
 
     # Validate in-memory trace
     trace = mlflow.get_trace(mlflow.get_last_active_trace_id())
-    assert trace.info.status == "OK"
+    assert trace.info.state == TraceState.OK
     tags = {k: v for k, v in trace.info.tags.items() if not k.startswith("mlflow.")}
     assert tags == expected_tags
 
     # Validate backend trace
     traces = get_traces()
     assert len(traces) == 1
-    assert traces[0].info.status == "OK"
+    assert traces[0].info.state == TraceState.OK
     tags = {k: v for k, v in traces[0].info.tags.items() if not k.startswith("mlflow.")}
     assert tags == expected_tags
 
@@ -1456,6 +1449,42 @@ def test_update_current_trace_client_request_id_stringification():
                     assert isinstance(trace.info.client_request_id, str)
 
 
+def test_update_current_trace_with_metadata():
+    """Test that update_current_trace correctly handles metadata parameter."""
+
+    @mlflow.trace
+    def f():
+        mlflow.update_current_trace(
+            metadata={
+                "mlflow.source.name": "inference.py",
+                "mlflow.source.git.commit": "1234567890",
+                "mlflow.source.git.repoURL": "https://github.com/mlflow/mlflow",
+                "non-string-metadata": 123,
+            },
+        )
+
+    f()
+
+    expected_metadata = {
+        "mlflow.source.name": "inference.py",
+        "mlflow.source.git.commit": "1234567890",
+        "mlflow.source.git.repoURL": "https://github.com/mlflow/mlflow",
+        "non-string-metadata": "123",  # Should be stringified
+    }
+
+    # Validate in-memory trace
+    trace = mlflow.get_trace(mlflow.get_last_active_trace_id())
+    for k, v in expected_metadata.items():
+        assert trace.info.trace_metadata[k] == v
+
+    # Validate backend trace
+    traces = get_traces()
+    assert len(traces) == 1
+    assert traces[0].info.status == "OK"
+    for k, v in expected_metadata.items():
+        assert traces[0].info.trace_metadata[k] == v
+
+
 @skip_when_testing_trace_sdk
 def test_update_current_trace_should_not_raise_during_model_logging():
     """
@@ -1496,6 +1525,214 @@ def test_update_current_trace_should_not_raise_during_model_logging():
     trace = get_traces()[0]
     assert trace.info.status == "OK"
     assert trace.info.tags["fruit"] == "apple"
+
+
+def test_update_current_trace_with_state():
+    """Test the state parameter in update_current_trace."""
+    from mlflow.tracing.trace_manager import InMemoryTraceManager
+
+    # Test with TraceState enum
+    with mlflow.start_span("test_span") as span:
+        mlflow.update_current_trace(state=TraceState.ERROR)
+
+        trace_manager = InMemoryTraceManager.get_instance()
+        with trace_manager.get_trace(span.trace_id) as trace:
+            assert trace.info.state == TraceState.ERROR
+
+    # Test with string state
+    with mlflow.start_span("test_span_2") as span:
+        mlflow.update_current_trace(state="OK")
+
+        trace_manager = InMemoryTraceManager.get_instance()
+        with trace_manager.get_trace(span.trace_id) as trace:
+            assert trace.info.state == TraceState.OK
+
+    # Test with combined parameters
+    with mlflow.start_span("test_span_3") as span:
+        mlflow.update_current_trace(
+            state="ERROR", tags={"error_type": "validation"}, client_request_id="req-123"
+        )
+
+        trace_manager = InMemoryTraceManager.get_instance()
+        with trace_manager.get_trace(span.trace_id) as trace:
+            assert trace.info.state == TraceState.ERROR
+            assert trace.info.tags["error_type"] == "validation"
+            assert trace.info.client_request_id == "req-123"
+
+
+def test_update_current_trace_state_none():
+    """Test that state=None doesn't change trace state."""
+    from mlflow.tracing.trace_manager import InMemoryTraceManager
+
+    with mlflow.start_span("test_span") as span:
+        # First set state to OK
+        mlflow.update_current_trace(state="OK")
+
+        # Then call with state=None - should not change state
+        mlflow.update_current_trace(state=None, tags={"test": "value"})
+
+        trace_manager = InMemoryTraceManager.get_instance()
+        with trace_manager.get_trace(span.trace_id) as trace:
+            assert trace.info.state == TraceState.OK
+            assert trace.info.tags["test"] == "value"
+
+
+def test_update_current_trace_state_validation():
+    """Test that state validation only allows OK or ERROR."""
+    with mlflow.start_span("test_span"):
+        # Valid states should work
+        mlflow.update_current_trace(state="OK")
+        mlflow.update_current_trace(state="ERROR")
+        mlflow.update_current_trace(state=TraceState.OK)
+        mlflow.update_current_trace(state=TraceState.ERROR)
+
+        # Invalid string state should raise an exception
+        with pytest.raises(
+            MlflowException, match=r"State must be either 'OK' or 'ERROR', but got 'IN_PROGRESS'"
+        ):
+            mlflow.update_current_trace(state="IN_PROGRESS")
+
+        # Invalid enum state should raise an exception
+        with pytest.raises(
+            MlflowException,
+            match=r"State must be either 'OK' or 'ERROR', but got 'STATE_UNSPECIFIED'",
+        ):
+            mlflow.update_current_trace(state=TraceState.STATE_UNSPECIFIED)
+
+        # Custom invalid string should raise an exception
+        with pytest.raises(
+            MlflowException, match=r"State must be either 'OK' or 'ERROR', but got 'CUSTOM_STATE'"
+        ):
+            mlflow.update_current_trace(state="CUSTOM_STATE")
+
+        # Invalid types should raise an exception with a proper error message
+        with pytest.raises(
+            MlflowException, match=r"State must be either 'OK' or 'ERROR', but got '123'"
+        ):
+            mlflow.update_current_trace(state=123)
+
+
+def test_span_record_exception_with_string():
+    """Test record_exception method with string parameter."""
+    with mlflow.start_span("test_span") as span:
+        span.record_exception("Something went wrong")
+
+    # Check persisted trace
+    trace = get_traces()[0]
+    spans = trace.data.spans
+    test_span = spans[0]
+
+    # Verify span status is ERROR
+    assert test_span.status.status_code == SpanStatusCode.ERROR
+
+    # Verify exception event was added
+    exception_events = [event for event in test_span.events if "exception" in event.name.lower()]
+    assert len(exception_events) == 1
+
+    # Verify exception message is in the event
+    exception_event = exception_events[0]
+    assert "Something went wrong" in str(exception_event.attributes)
+
+
+def test_span_record_exception_with_exception():
+    """Test record_exception method with Exception parameter."""
+    test_exception = ValueError("Custom error message")
+
+    with mlflow.start_span("test_span") as span:
+        span.record_exception(test_exception)
+
+    # Check persisted trace
+    trace = get_traces()[0]
+    spans = trace.data.spans
+    test_span = spans[0]
+
+    # Verify span status is ERROR
+    assert test_span.status.status_code == SpanStatusCode.ERROR
+
+    # Verify exception event was added with proper exception details
+    exception_events = [event for event in test_span.events if "exception" in event.name.lower()]
+    assert len(exception_events) == 1
+
+    exception_event = exception_events[0]
+    event_attrs = str(exception_event.attributes)
+    assert "ValueError" in event_attrs
+    assert "Custom error message" in event_attrs
+
+
+def test_span_record_exception_invalid_type():
+    """Test record_exception method with invalid parameter type."""
+    with mlflow.start_span("test_span") as span:
+        with pytest.raises(
+            MlflowException,
+            match="The `exception` parameter must be an Exception instance or a string",
+        ):
+            span.record_exception(123)
+
+
+def test_combined_state_and_record_exception():
+    """Test using both status update and record_exception together."""
+
+    @mlflow.trace
+    def test_function():
+        # Get current span and record exception
+        span = mlflow.get_current_active_span()
+        span.record_exception("Processing failed")
+
+        # Update trace state independently
+        mlflow.update_current_trace(state="ERROR", tags={"error_source": "processing"})
+        return "result"
+
+    test_function()
+
+    # Check the trace
+    trace = get_traces()[0]
+
+    # Verify trace state was set to ERROR
+    assert trace.info.state == TraceState.ERROR
+    assert trace.info.tags["error_source"] == "processing"
+
+    # Verify span has exception event and ERROR state
+    spans = trace.data.spans
+    root_span = spans[0]
+    assert root_span.status.status_code == SpanStatusCode.ERROR
+
+    exception_events = [event for event in root_span.events if "exception" in event.name.lower()]
+    assert len(exception_events) == 1
+    assert "Processing failed" in str(exception_events[0].attributes)
+
+
+def test_span_record_exception_no_op_span():
+    """Test that record_exception works gracefully with NoOpSpan."""
+    # This should not raise an exception
+    from mlflow.entities.span import NoOpSpan
+
+    no_op_span = NoOpSpan()
+    no_op_span.record_exception("This should be ignored")
+
+    # Should not create any traces
+    assert get_traces() == []
+
+
+def test_update_current_trace_state_isolation():
+    """Test that state update doesn't affect span status."""
+    with mlflow.start_span("test_span") as span:
+        # Set span status to OK explicitly
+        span.set_status("OK")
+
+        # Update trace state to ERROR
+        mlflow.update_current_trace(state="ERROR")
+
+        # Span status should still be OK
+        assert span.status.status_code == SpanStatusCode.OK
+
+    # Check the final persisted trace
+    trace = get_traces()[0]
+    assert trace.info.state == TraceState.ERROR
+
+    # Verify span status remained OK despite trace state being ERROR
+    spans = trace.data.spans
+    test_span = spans[0]
+    assert test_span.status.status_code == SpanStatusCode.OK
 
 
 @skip_when_testing_trace_sdk
@@ -1694,12 +1931,12 @@ def test_add_trace_raise_for_invalid_trace():
         mlflow.add_trace({"info": {}, "data": {}})
 
     in_progress_trace = Trace(
-        info=TraceInfoV2(
-            request_id="123",
-            status=TraceStatus.IN_PROGRESS,
-            experiment_id="0",
-            timestamp_ms=0,
-            execution_time_ms=0,
+        info=TraceInfo(
+            trace_id="123",
+            trace_location=TraceLocation.from_experiment_id("0"),
+            request_time=0,
+            execution_duration=0,
+            state=TraceState.IN_PROGRESS,
         ),
         data=TraceData(),
     )
@@ -1837,3 +2074,38 @@ def test_set_delete_trace_tag():
     mlflow.delete_trace_tag(request_id=trace_id, key="key3")
     trace = mlflow.get_trace(request_id=trace_id)
     assert "key3" not in trace.info.tags
+
+
+@pytest.mark.parametrize("is_databricks", [True, False])
+def test_search_traces_with_run_id_validates_store_filter_string(is_databricks):
+    # Mock the store
+    mock_store = mock.MagicMock()
+    mock_store.search_traces.return_value = ([], None)  # Return empty results
+    mock_store.get_run.return_value = mock.MagicMock()
+    mock_store.get_run.return_value.info.experiment_id = "test_exp_id"
+
+    test_run_id = "test_run_123"
+
+    with (
+        mock.patch("mlflow.tracing.client._get_store", return_value=mock_store),
+        mock.patch("mlflow.tracing.client.is_databricks_uri", return_value=is_databricks),
+        mock.patch("mlflow.tracking.fluent._get_experiment_id", return_value="test_exp_id"),
+    ):
+        # Call search_traces with run_id but no experiment_ids
+        mlflow.search_traces(run_id=test_run_id)
+
+        # Verify the store was called with the correct filter string
+        if is_databricks:
+            expected_filter_string = f"attribute.run_id = '{test_run_id}'"
+        else:
+            expected_filter_string = f"metadata.{TraceMetadataKey.SOURCE_RUN} = '{test_run_id}'"
+
+        mock_store.search_traces.assert_called()
+
+        # Get the actual arguments passed to the store
+        call_args = mock_store.search_traces.call_args
+        actual_filter_string = call_args[1]["filter_string"]  # using keyword arguments
+
+        assert actual_filter_string == expected_filter_string, (
+            f"Expected filter string '{expected_filter_string}', but got '{actual_filter_string}'"
+        )

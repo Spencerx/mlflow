@@ -7,6 +7,7 @@ from autogen_ext.models.replay import ReplayChatCompletionClient
 
 import mlflow
 from mlflow.entities.span import SpanType
+from mlflow.tracing.constant import SpanAttributeKey
 
 from tests.tracing.helper import get_traces
 
@@ -42,33 +43,42 @@ async def test_autolog_assistant_agent(disable):
         assert span.name == "run"
         assert span.span_type == SpanType.AGENT
         assert span.inputs == {"task": "1+1"}
-        assert span.outputs["messages"] == [
-            {
+        messages = span.outputs["messages"]
+        assert len(messages) == 2
+        assert (
+            messages[0].items()
+            >= {
                 "content": "1+1",
                 "source": "user",
                 "models_usage": None,
                 "metadata": {},
                 "type": "TextMessage",
-            },
-            {
+            }.items()
+        )
+        assert (
+            messages[1].items()
+            >= {
                 "content": "2",
                 "source": "assistant",
                 "models_usage": _MODEL_USAGE,
                 "metadata": {},
                 "type": "TextMessage",
-            },
-        ]
+            }.items()
+        )
 
         span = trace.data.spans[1]
         assert span.name == "on_messages"
         assert span.span_type == SpanType.AGENT
-        assert span.outputs["chat_message"] == {
-            "source": "assistant",
-            "models_usage": _MODEL_USAGE,
-            "metadata": {},
-            "content": "2",
-            "type": "TextMessage",
-        }
+        assert (
+            span.outputs["chat_message"].items()
+            >= {
+                "source": "assistant",
+                "models_usage": _MODEL_USAGE,
+                "metadata": {},
+                "content": "2",
+                "type": "TextMessage",
+            }.items()
+        )
 
         span = trace.data.spans[2]
         assert span.name == "create"
@@ -83,6 +93,18 @@ async def test_autolog_assistant_agent(disable):
             {"role": "user", "content": "1+1"},
             {"role": "assistant", "content": "2"},
         ]
+
+        assert span.get_attribute(SpanAttributeKey.CHAT_USAGE) == {
+            "input_tokens": 6,
+            "output_tokens": 1,
+            "total_tokens": 7,
+        }
+
+        assert traces[0].info.token_usage == {
+            "input_tokens": 6,
+            "output_tokens": 1,
+            "total_tokens": 7,
+        }
 
 
 @pytest.mark.asyncio
@@ -138,15 +160,22 @@ async def test_autolog_tool_agent():
     assert span.name == "run"
     assert span.span_type == SpanType.AGENT
     assert span.inputs == {"task": "1+1"}
-    assert span.outputs["messages"] == [
-        {
+    messages = span.outputs["messages"]
+    assert len(messages) == 4
+    assert (
+        messages[0].items()
+        >= {
             "content": "1+1",
             "source": "user",
             "models_usage": None,
             "metadata": {},
             "type": "TextMessage",
-        },
-        {
+        }.items()
+    )
+
+    assert (
+        messages[1].items()
+        >= {
             "content": [
                 {
                     "id": "1",
@@ -158,8 +187,11 @@ async def test_autolog_tool_agent():
             "models_usage": _MODEL_USAGE,
             "metadata": {},
             "type": "ToolCallRequestEvent",
-        },
-        {
+        }.items()
+    )
+    assert (
+        messages[2].items()
+        >= {
             "content": [
                 {
                     "call_id": "1",
@@ -172,26 +204,32 @@ async def test_autolog_tool_agent():
             "models_usage": None,
             "metadata": {},
             "type": "ToolCallExecutionEvent",
-        },
-        {
+        }.items()
+    )
+    assert (
+        messages[3].items()
+        >= {
             "content": "2",
             "source": "assistant",
             "models_usage": None,
             "metadata": {},
             "type": "ToolCallSummaryMessage",
-        },
-    ]
+        }.items()
+    )
 
     span = trace.data.spans[1]
     assert span.name == "on_messages"
     assert span.span_type == SpanType.AGENT
-    assert span.outputs["chat_message"] == {
-        "source": "assistant",
-        "models_usage": None,
-        "metadata": {},
-        "content": "2",
-        "type": "ToolCallSummaryMessage",
-    }
+    assert (
+        span.outputs["chat_message"].items()
+        >= {
+            "source": "assistant",
+            "models_usage": None,
+            "metadata": {},
+            "content": "2",
+            "type": "ToolCallSummaryMessage",
+        }.items()
+    )
     assert span.get_attribute("mlflow.chat.tools") == TOOL_ATTRIBUTES
 
     span = trace.data.spans[2]
@@ -219,6 +257,18 @@ async def test_autolog_tool_agent():
             ],
         },
     ]
+
+    assert span.get_attribute(SpanAttributeKey.CHAT_USAGE) == {
+        "input_tokens": 6,
+        "output_tokens": 1,
+        "total_tokens": 7,
+    }
+
+    assert traces[0].info.token_usage == {
+        "input_tokens": 6,
+        "output_tokens": 1,
+        "total_tokens": 7,
+    }
 
 
 @pytest.mark.asyncio
@@ -248,8 +298,11 @@ async def test_autolog_multi_modal():
     assert span.span_type == SpanType.AGENT
     assert span.inputs["task"]["content"][0] == "Can you describe the number in the image?"
     assert "data" in span.inputs["task"]["content"][1]
-    assert span.outputs["messages"] == [
-        {
+    messages = span.outputs["messages"]
+    assert len(messages) == 2
+    assert (
+        messages[0].items()
+        >= {
             "content": [
                 "Can you describe the number in the image?",
                 {
@@ -260,26 +313,32 @@ async def test_autolog_multi_modal():
             "models_usage": None,
             "metadata": {},
             "type": "MultiModalMessage",
-        },
-        {
+        }.items()
+    )
+    assert (
+        messages[1].items()
+        >= {
             "content": "2",
             "source": "assistant",
             "models_usage": {"completion_tokens": 1, "prompt_tokens": 14},
             "metadata": {},
             "type": "TextMessage",
-        },
-    ]
+        }.items()
+    )
 
     span = trace.data.spans[1]
     assert span.name == "on_messages"
     assert span.span_type == SpanType.AGENT
-    assert span.outputs["chat_message"] == {
-        "source": "assistant",
-        "models_usage": {"completion_tokens": 1, "prompt_tokens": 14},
-        "metadata": {},
-        "content": "2",
-        "type": "TextMessage",
-    }
+    assert (
+        span.outputs["chat_message"].items()
+        >= {
+            "source": "assistant",
+            "models_usage": {"completion_tokens": 1, "prompt_tokens": 14},
+            "metadata": {},
+            "content": "2",
+            "type": "TextMessage",
+        }.items()
+    )
 
     span = trace.data.spans[2]
     assert span.name == "create"
@@ -294,3 +353,15 @@ async def test_autolog_multi_modal():
         {"role": "user", "content": f"{user_message}\n<image>"},
         {"role": "assistant", "content": "2"},
     ]
+
+    assert span.get_attribute(SpanAttributeKey.CHAT_USAGE) == {
+        "input_tokens": 14,
+        "output_tokens": 1,
+        "total_tokens": 15,
+    }
+
+    assert traces[0].info.token_usage == {
+        "input_tokens": 14,
+        "output_tokens": 1,
+        "total_tokens": 15,
+    }

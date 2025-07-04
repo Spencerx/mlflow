@@ -163,7 +163,7 @@ def _handle_ndarray_nans(x: np.ndarray):
         return x
 
 
-def _handle_ndarray_input(input_array: Union[np.ndarray, dict]):
+def _handle_ndarray_input(input_array: Union[np.ndarray, dict[str, Any]]):
     if isinstance(input_array, dict):
         result = {}
         for name in input_array.keys():
@@ -468,7 +468,7 @@ def _split_input_data_and_params(input_example):
     return input_example, None
 
 
-@experimental
+@experimental(version="2.16.0")
 def convert_input_example_to_serving_input(input_example) -> Optional[str]:
     """
     Helper function to convert a model's input example to a serving input example that
@@ -521,7 +521,9 @@ def _save_example(  # noqa: D417
     return example
 
 
-def _get_mlflow_model_input_example_dict(mlflow_model: Model, uri_or_path: str) -> Optional[dict]:
+def _get_mlflow_model_input_example_dict(
+    mlflow_model: Model, uri_or_path: str
+) -> Optional[dict[str, Any]]:
     """
     Args:
         mlflow_model: Model metadata.
@@ -795,7 +797,13 @@ def _enforce_mlflow_datatype(name, values: pd.Series, t: DataType):
         # NB: datetime values have variable precision denoted by brackets, e.g. datetime64[ns]
         # denotes nanosecond precision. Since MLflow datetime type is precision agnostic, we
         # ignore precision when matching datetime columns.
-        return values.astype(np.dtype("datetime64[ns]"))
+        try:
+            return values.astype(np.dtype("datetime64[ns]"))
+        except TypeError as e:
+            raise MlflowException(
+                "Please ensure that the input data of datetime column only contains timezone-naive "
+                f"datetime objects. Error: {e}"
+            )
 
     if t == DataType.datetime and (values.dtype == object or values.dtype == t.to_python()):
         # NB: Pyspark date columns get converted to object when converted to a pandas
@@ -1778,7 +1786,7 @@ def _convert_llm_ndarray_to_list(data):
     return data
 
 
-def _convert_llm_input_data(data: Any) -> Union[list, dict]:
+def _convert_llm_input_data(data: Any) -> Union[list[Any], dict[str, Any]]:
     """
     Convert input data to a format that can be passed to the model with GenAI flavors such as
     LangChain and LLamaIndex.
@@ -1978,7 +1986,7 @@ def _flatten_nested_params(
 
 # NB: this function should always be kept in sync with the serving
 # process in scoring_server invocations.
-@experimental
+@experimental(version="2.16.0")
 def validate_serving_input(model_uri: str, serving_input: Union[str, dict[str, Any]]):
     """
     Helper function to validate the model can be served and provided input is valid
