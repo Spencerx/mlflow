@@ -22,6 +22,7 @@ class MlflowModelVersionDeploymentJobStateDeploymentJobRunState(graphene.Enum):
     SUCCEEDED = 4
     FAILED = 5
     PENDING = 6
+    APPROVAL = 7
 
 
 class MlflowModelVersionStatus(graphene.Enum):
@@ -197,7 +198,7 @@ class MlflowMetric(graphene.ObjectType):
 
 
 class MlflowRunData(graphene.ObjectType):
-    metrics = graphene.List(graphene.NonNull(MlflowMetric))
+    metrics = graphene.List(graphene.NonNull('mlflow.server.graphql.graphql_schema_extensions.MlflowMetricExtension'))
     params = graphene.List(graphene.NonNull(MlflowParam))
     tags = graphene.List(graphene.NonNull(MlflowRunTag))
 

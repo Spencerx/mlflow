@@ -50,10 +50,10 @@ def _convert_eval_set_to_df(data: "EvaluationDatasetTypes") -> "pd.DataFrame":
         df = data.copy()
     else:
         try:
-            import pyspark.sql.dataframe
+            from mlflow.utils.spark_utils import get_spark_dataframe_type
 
-            if isinstance(data, pyspark.sql.dataframe.DataFrame):
-                df = data.toPandas()
+            if isinstance(data, get_spark_dataframe_type()):
+                df = _deserialize_inputs_and_expectations_column(data.toPandas())
             else:
                 raise MlflowException.invalid_parameter_value(
                     "Invalid type for parameter `data`. Expected a list of dictionaries, "
@@ -100,9 +100,56 @@ def _convert_to_legacy_eval_set(data: "EvaluationDatasetTypes") -> "pd.DataFrame
 
     return (
         df.rename(columns=column_mapping)
+        .pipe(_deserialize_trace_column_if_needed)
         .pipe(_extract_request_from_trace)
         .pipe(_extract_expectations_from_trace)
     )
+
+
+def _deserialize_inputs_and_expectations_column(df: "pd.DataFrame") -> "pd.DataFrame":
+    """
+    Deserialize the `inputs` and `expectations` string columns from the dataframe.
+
+    When managed datasets are read as Spark DataFrames, the `inputs` and `expectations` columns
+    are loaded as string columns of JSON strings. This function deserializes these columns into
+    dictionaries expected by mlflow.genai.evaluate().
+    """
+    target_columns = ["inputs", "expectations"]
+    for col in target_columns:
+        if col not in df.columns or not isinstance(df[col][0], str):
+            continue
+
+        try:
+            df[col] = df[col].apply(json.loads)
+        except json.JSONDecodeError as e:
+            if col == "inputs":
+                msg = (
+                    "The `inputs` column must be a valid JSON string of field names and values. "
+                    "For example, `{'question': 'What is the capital of France?'}`"
+                )
+            else:
+                msg = (
+                    "The `expectations` column must be a valid JSON string of assessment names and "
+                    "values. For example, `{'expected_facts': ['fact1', 'fact2']}`"
+                )
+            raise MlflowException.invalid_parameter_value(
+                f"Failed to parse `{col}` column. Error: {e}\nHint: {msg}"
+            )
+
+    return df
+
+
+def _deserialize_trace_column_if_needed(df: "pd.DataFrame") -> "pd.DataFrame":
+    """
+    Deserialize the `trace` column from the dataframe if it is a string.
+
+    Since MLflow 3.2.0, mlflow.search_traces() returns a pandas DataFrame with a `trace`
+    column that is a trace json representation rather than the Trace object itself. This
+    function deserializes the `trace` column into a Trace object.
+    """
+    if "trace" in df.columns:
+        df["trace"] = df["trace"].apply(lambda t: Trace.from_json(t) if isinstance(t, str) else t)
+    return df
 
 
 def _extract_request_from_trace(df: "pd.DataFrame") -> "pd.DataFrame":

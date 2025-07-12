@@ -2,7 +2,7 @@
 # Required for testing utilities for parsing pip requirements
 pip>=20.1
 ## Test-only dependencies
-pytest==8.1.1
+pytest
 pytest-asyncio
 pytest-repeat
 pytest-cov
@@ -44,3 +44,5 @@ opentelemetry-exporter-otlp-proto-http
 scikit-learn<1.6
 # Required for testing mlflow.server.auth
 Flask-WTF<2
+# required for testing polars dataset integration
+polars>=1

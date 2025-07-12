@@ -1,12 +1,13 @@
+from dataclasses import asdict
 from typing import Any, Optional, Union
 
-from mlflow.entities import Assessment
+import mlflow
 from mlflow.entities.assessment import Feedback
 from mlflow.entities.trace import Trace
 from mlflow.exceptions import MlflowException
 from mlflow.genai import judges
 from mlflow.genai.judges.databricks import requires_databricks_agents
-from mlflow.genai.scorers.base import Scorer
+from mlflow.genai.scorers.base import _SERIALIZATION_VERSION, Scorer, SerializedScorer
 from mlflow.genai.utils.trace_utils import (
     extract_retrieval_context_from_trace,
     parse_inputs_to_str,
@@ -23,7 +24,59 @@ class BuiltInScorer(Scorer):
     inherit from this class.
     """
 
+    name: str
     required_columns: set[str] = set()
+
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """Override model_dump to handle builtin scorer serialization."""
+        # Use mode='json' to automatically convert sets to lists for JSON compatibility
+        from pydantic import BaseModel
+
+        pydantic_model_data = BaseModel.model_dump(self, mode="json", **kwargs)
+
+        # Create serialized scorer with core fields
+        serialized = SerializedScorer(
+            name=self.name,
+            aggregations=self.aggregations,
+            mlflow_version=mlflow.__version__,
+            serialization_version=_SERIALIZATION_VERSION,
+            builtin_scorer_class=self.__class__.__name__,
+            builtin_scorer_pydantic_data=pydantic_model_data,
+        )
+
+        return asdict(serialized)
+
+    @classmethod
+    def model_validate(cls, obj) -> "BuiltInScorer":
+        """Override model_validate to handle builtin scorer deserialization."""
+        if not isinstance(obj, dict) or "builtin_scorer_class" not in obj:
+            raise MlflowException.invalid_parameter_value(
+                f"Invalid builtin scorer data: expected a dictionary with 'builtin_scorer_class'"
+                f" field, got {type(obj).__name__}."
+            )
+
+        from mlflow.genai.scorers import builtin_scorers
+        from mlflow.genai.scorers.base import SerializedScorer
+
+        # Parse the serialized data using our dataclass
+        try:
+            serialized = SerializedScorer(**obj)
+        except Exception as e:
+            raise MlflowException.invalid_parameter_value(
+                f"Failed to parse serialized scorer data: {e}"
+            )
+
+        try:
+            scorer_class = getattr(builtin_scorers, serialized.builtin_scorer_class)
+        except AttributeError:
+            raise MlflowException.invalid_parameter_value(
+                f"Unknown builtin scorer class: {serialized.builtin_scorer_class}"
+            )
+
+        # Use the builtin_scorer_pydantic_data directly to reconstruct the scorer
+        constructor_args = serialized.builtin_scorer_pydantic_data or {}
+
+        return scorer_class(**constructor_args)
 
     def validate_columns(self, columns: set[str]) -> None:
         missing_columns = self.required_columns - columns
@@ -32,7 +85,7 @@ class BuiltInScorer(Scorer):
 
 
 # === Builtin Scorers ===
-@experimental
+@experimental(version="3.0.0")
 class RetrievalRelevance(BuiltInScorer):
     """
     Retrieval relevance measures whether each chunk is relevant to the input request.
@@ -121,7 +174,7 @@ class RetrievalRelevance(BuiltInScorer):
         return [span_level_feedback] + chunk_feedbacks
 
 
-@experimental
+@experimental(version="3.0.0")
 class RetrievalSufficiency(BuiltInScorer):
     """
     Retrieval sufficiency evaluates whether the retrieved documents provide all necessary
@@ -210,7 +263,7 @@ class RetrievalSufficiency(BuiltInScorer):
         return feedbacks
 
 
-@experimental
+@experimental(version="3.0.0")
 class RetrievalGroundedness(BuiltInScorer):
     """
     RetrievalGroundedness assesses whether the agent's response is aligned with the information
@@ -269,18 +322,14 @@ class RetrievalGroundedness(BuiltInScorer):
         return feedbacks
 
 
-@experimental
-class GuidelineAdherence(BuiltInScorer):
+@experimental(version="3.0.0")
+class Guidelines(BuiltInScorer):
     """
     Guideline adherence evaluates whether the agent's response follows specific constraints
     or instructions provided in the guidelines.
 
     You can invoke the scorer directly with a single input for testing, or pass it to
     `mlflow.genai.evaluate` for running full evaluation on a dataset.
-
-    There are two different ways to specify judges, depending on the use case:
-
-    **1. Global Guidelines**
 
     If you want to evaluate all the response with a single set of guidelines, you can specify
     the guidelines in the `guidelines` parameter of this scorer.
@@ -290,12 +339,12 @@ class GuidelineAdherence(BuiltInScorer):
     .. code-block:: python
 
         import mlflow
-        from mlflow.genai.scorers import GuidelineAdherence
+        from mlflow.genai.scorers import Guidelines
 
         # Create a global judge
-        english = GuidelineAdherence(
+        english = Guidelines(
             name="english_guidelines",
-            global_guidelines=["The response must be in English"],
+            guidelines=["The response must be in English"],
         )
         feedback = english(
             inputs={"question": "What is the capital of France?"},
@@ -312,15 +361,15 @@ class GuidelineAdherence(BuiltInScorer):
     .. code-block:: python
 
         import mlflow
-        from mlflow.genai.scorers import GuidelineAdherence
+        from mlflow.genai.scorers import Guidelines
 
-        english = GuidelineAdherence(
+        english = Guidelines(
             name="english",
-            global_guidelines=["The response must be in English"],
+            guidelines=["The response must be in English"],
         )
-        clarify = GuidelineAdherence(
+        clarify = Guidelines(
             name="clarify",
-            global_guidelines=["The response must be clear, coherent, and concise"],
+            guidelines=["The response must be clear, coherent, and concise"],
         )
 
         data = [
@@ -334,23 +383,60 @@ class GuidelineAdherence(BuiltInScorer):
             },
         ]
         mlflow.genai.evaluate(data=data, scorers=[english, clarify])
+    """
 
-    **2. Per-Example Guidelines**
+    name: str = "guidelines"
+    guidelines: Union[str, list[str]]
+    required_columns: set[str] = {"inputs", "outputs"}
 
-    When you have a different set of guidelines for each example, you can specify the guidelines
-    in the `guidelines` field of the `expectations` column of the input dataset. Alternatively,
-    you can annotate a trace with "guidelines" expectation and use the trace as an input data.
+    def __call__(
+        self,
+        *,
+        inputs: dict[str, Any],
+        outputs: Any,
+    ) -> Feedback:
+        """
+        Evaluate adherence to specified guidelines.
+
+        Args:
+            inputs: A dictionary of input data, e.g. {"question": "What is the capital of France?"}.
+            outputs: The response from the model, e.g. "The capital of France is Paris."
+
+        Returns:
+            An :py:class:`mlflow.entities.assessment.Feedback~` object with a boolean value
+            indicating the adherence to the specified guidelines.
+        """
+        return judges.meets_guidelines(
+            guidelines=self.guidelines,
+            context={
+                "request": parse_inputs_to_str(inputs),
+                "response": parse_output_to_str(outputs),
+            },
+            name=self.name,
+        )
+
+
+@experimental(version="3.0.0")
+class ExpectationsGuidelines(BuiltInScorer):
+    """
+    This scorer evaluates whether the agent's response follows specific constraints
+    or instructions provided for each row in the input dataset. This scorer is useful when
+    you have a different set of guidelines for each example.
+
+    To use this scorer, the input dataset should contain the `expectations` column with the
+    `guidelines` field. Then pass this scorer to `mlflow.genai.evaluate` for running full
+    evaluation on the input dataset.
 
     Example:
 
     In this example, the guidelines specified in the `guidelines` field of the `expectations`
     column will be applied to each example individually. The evaluation result will contain a
-    single "guideline_adherence" score.
+    single "expectations_guidelines" score.
 
     .. code-block:: python
 
         import mlflow
-        from mlflow.genai.scorers import GuidelineAdherence
+        from mlflow.genai.scorers import ExpectationsGuidelines
 
         data = [
             {
@@ -368,17 +454,15 @@ class GuidelineAdherence(BuiltInScorer):
                 },
             },
         ]
-        mlflow.genai.evaluate(data=data, scorers=[GuidelineAdherence()])
+        mlflow.genai.evaluate(data=data, scorers=[ExpectationsGuidelines()])
     """
 
-    name: str = "guideline_adherence"
-    global_guidelines: Optional[Union[str, list[str]]] = None
+    name: str = "expectations_guidelines"
     required_columns: set[str] = {"inputs", "outputs"}
 
     def validate_columns(self, columns: set[str]) -> None:
         super().validate_columns(columns)
-        # If no global guidelines are specified, the guidelines must exist in the input dataset
-        if not self.global_guidelines and "expectations/guidelines" not in columns:
+        if "expectations/guidelines" not in columns:
             raise MissingColumnsException(self.name, ["expectations/guidelines"])
 
     def __call__(
@@ -387,7 +471,7 @@ class GuidelineAdherence(BuiltInScorer):
         inputs: dict[str, Any],
         outputs: Any,
         expectations: Optional[dict[str, Any]] = None,
-    ) -> Assessment:
+    ) -> Feedback:
         """
         Evaluate adherence to specified guidelines.
 
@@ -400,14 +484,14 @@ class GuidelineAdherence(BuiltInScorer):
                 E.g., {"guidelines": ["The response must be factual and concise"]}
 
         Returns:
-            An :py:class:`mlflow.entities.assessment.Assessment~` object with a boolean value
+            An :py:class:`mlflow.entities.assessment.Feedback~` object with a boolean value
             indicating the adherence to the specified guidelines.
         """
-        guidelines = (expectations or {}).get("guidelines", self.global_guidelines)
+        guidelines = (expectations or {}).get("guidelines")
         if not guidelines:
             raise MlflowException(
-                "Guidelines must be specified either in the `expectations` parameter or "
-                "by the `global_guidelines` attribute of the scorer."
+                "Guidelines must be specified in the `expectations` parameter or "
+                "must be present in the trace."
             )
 
         return judges.meets_guidelines(
@@ -420,7 +504,7 @@ class GuidelineAdherence(BuiltInScorer):
         )
 
 
-@experimental
+@experimental(version="3.0.0")
 class RelevanceToQuery(BuiltInScorer):
     """
     Relevance ensures that the agent's response directly addresses the user's input without
@@ -475,13 +559,10 @@ class RelevanceToQuery(BuiltInScorer):
         """
         request = parse_inputs_to_str(inputs)
         # NB: Reuse is_context_relevant judge to evaluate response
-        feedback = judges.is_context_relevant(request=request, context=outputs, name=self.name)
-        # drop chunk id metadata
-        feedback.metadata.pop("chunk_index", None)
-        return feedback
+        return judges.is_context_relevant(request=request, context=outputs, name=self.name)
 
 
-@experimental
+@experimental(version="3.0.0")
 class Safety(BuiltInScorer):
     """
     Safety ensures that the agent's responses do not contain harmful, offensive, or toxic content.
@@ -532,7 +613,7 @@ class Safety(BuiltInScorer):
         return judges.is_safe(content=parse_output_to_str(outputs), name=self.name)
 
 
-@experimental
+@experimental(version="3.0.0")
 class Correctness(BuiltInScorer):
     """
     Correctness ensures that the agent's responses are correct and accurate.
@@ -640,32 +721,8 @@ class Correctness(BuiltInScorer):
         )
 
 
-# === Shorthand for all builtin RAG scorers ===
-@experimental
-def get_rag_scorers() -> list[BuiltInScorer]:
-    """
-    Returns a list of built-in scorers for evaluating RAG models. Contains scorers
-    chunk_relevance, context_sufficiency, groundedness, and relevance_to_query.
-
-    Example:
-
-    .. code-block:: python
-
-        import mlflow
-        from mlflow.genai.scorers import get_rag_scorers
-
-        data = mlflow.search_traces(...)
-        result = mlflow.genai.evaluate(data=data, scorers=get_rag_scorers())
-    """
-    return [
-        RetrievalRelevance(),
-        RetrievalSufficiency(),
-        RetrievalGroundedness(),
-        RelevanceToQuery(),
-    ]
-
-
-@experimental
+# === Shorthand for getting preset of builtin scorers ===
+@experimental(version="3.0.0")
 def get_all_scorers() -> list[BuiltInScorer]:
     """
     Returns a list of all built-in scorers.
@@ -688,10 +745,14 @@ def get_all_scorers() -> list[BuiltInScorer]:
         ]
         result = mlflow.genai.evaluate(data=data, scorers=get_all_scorers())
     """
-    return get_rag_scorers() + [
-        GuidelineAdherence(),
+    return [
+        ExpectationsGuidelines(),
         Safety(),
         Correctness(),
+        RelevanceToQuery(),
+        RetrievalRelevance(),
+        RetrievalSufficiency(),
+        RetrievalGroundedness(),
     ]
 
 
